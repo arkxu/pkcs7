@@ -254,7 +254,7 @@ func verifySignature(p7 *PKCS7, signer signerInfo) error {
 		return errors.New("pkcs7: No certificate for signer")
 	}
 
-	algo := x509.SHA1WithRSA
+	algo := x509.SHA256WithRSA
 	return cert.CheckSignature(algo, signedData, signer.EncryptedDigest)
 }
 
@@ -274,6 +274,7 @@ func marshalAttributes(attrs []attribute) ([]byte, error) {
 
 var (
 	oidDigestAlgorithmSHA1    = asn1.ObjectIdentifier{1, 3, 14, 3, 2, 26}
+	oidDigestAlgorithmSHA256  = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}
 	oidEncryptionAlgorithmRSA = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 1}
 )
 
@@ -290,6 +291,8 @@ func getHashForOID(oid asn1.ObjectIdentifier) (crypto.Hash, error) {
 	switch {
 	case oid.Equal(oidDigestAlgorithmSHA1):
 		return crypto.SHA1, nil
+	case oid.Equal(oidDigestAlgorithmSHA256):
+		return crypto.SHA256, nil
 	}
 	return crypto.Hash(0), ErrUnsupportedAlgorithm
 }
@@ -530,9 +533,9 @@ func NewSignedData(data []byte) (*SignedData, error) {
 		Content:     asn1.RawValue{Class: 2, Tag: 0, Bytes: content, IsCompound: true},
 	}
 	digAlg := pkix.AlgorithmIdentifier{
-		Algorithm: oidDigestAlgorithmSHA1,
+		Algorithm: oidDigestAlgorithmSHA256,
 	}
-	h := crypto.SHA1.New()
+	h := crypto.SHA256.New()
 	h.Write(data)
 	md := h.Sum(nil)
 	sd := signedData{
@@ -620,7 +623,7 @@ func (sd *SignedData) AddSigner(cert *x509.Certificate, pkey crypto.PrivateKey, 
 	if err != nil {
 		return err
 	}
-	signature, err := signAttributes(finalAttrs, pkey, crypto.SHA1)
+	signature, err := signAttributes(finalAttrs, pkey, crypto.SHA256)
 	if err != nil {
 		return err
 	}
@@ -632,7 +635,32 @@ func (sd *SignedData) AddSigner(cert *x509.Certificate, pkey crypto.PrivateKey, 
 
 	signer := signerInfo{
 		AuthenticatedAttributes:   finalAttrs,
-		DigestAlgorithm:           pkix.AlgorithmIdentifier{Algorithm: oidDigestAlgorithmSHA1},
+		DigestAlgorithm:           pkix.AlgorithmIdentifier{Algorithm: oidDigestAlgorithmSHA256},
+		DigestEncryptionAlgorithm: pkix.AlgorithmIdentifier{Algorithm: oidEncryptionAlgorithmRSA},
+		IssuerAndSerialNumber:     ias,
+		EncryptedDigest:           signature,
+		Version:                   1,
+	}
+	// create signature of signed attributes
+	sd.certs = append(sd.certs, cert)
+	sd.sd.SignerInfos = append(sd.sd.SignerInfos, signer)
+	return nil
+}
+
+// AddNoAttributeSigner signs the whole content without add certs
+func (sd *SignedData) AddNoAttributeSigner(cert *x509.Certificate, pkey crypto.PrivateKey) error {
+	signature, err := signBytes(sd.messageDigest, pkey)
+	if err != nil {
+		return err
+	}
+
+	ias, err := cert2issuerAndSerial(cert)
+	if err != nil {
+		return err
+	}
+
+	signer := signerInfo{
+		DigestAlgorithm:           pkix.AlgorithmIdentifier{Algorithm: oidDigestAlgorithmSHA256},
 		DigestEncryptionAlgorithm: pkix.AlgorithmIdentifier{Algorithm: oidEncryptionAlgorithmRSA},
 		IssuerAndSerialNumber:     ias,
 		EncryptedDigest:           signature,
@@ -690,7 +718,16 @@ func signAttributes(attrs []attribute, pkey crypto.PrivateKey, hash crypto.Hash)
 	hashed := h.Sum(nil)
 	switch priv := pkey.(type) {
 	case *rsa.PrivateKey:
-		return rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA1, hashed)
+		return rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, hashed)
+	}
+	return nil, ErrUnsupportedAlgorithm
+}
+
+// sign the bytes using SHA256
+func signBytes(b []byte, pkey crypto.PrivateKey) ([]byte, error) {
+	switch priv := pkey.(type) {
+	case *rsa.PrivateKey:
+		return rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, b)
 	}
 	return nil, ErrUnsupportedAlgorithm
 }
